@@ -161,7 +161,7 @@
         }
 
         /* Camera Modal */
-        #camera-modal {
+        #camera-modal-fixed {
             display: none;
         }
 
@@ -389,8 +389,8 @@
     </div>
 
     <!-- Camera Modal -->
-    <div id="camera-modal"
-        class="fixed inset-0 bg-black bg-opacity-80 z-[100] flex items-center justify-center p-4 hidden">
+    <div id="camera-modal-fixed"
+        class="fixed inset-0 bg-black bg-opacity-80 z-[9999] flex items-center justify-center p-4 hidden">
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
             <div class="px-5 py-4 border-b">
                 <h3 class="font-bold text-lg text-slate-800">Live Camera</h3>
@@ -410,8 +410,8 @@
     </div>
 
     <!-- QR Scanner Modal -->
-    <div id="qr-scanner-modal"
-        class="fixed inset-0 bg-black bg-opacity-80 z-[100] flex items-center justify-center p-4 hidden">
+    <div id="qr-scanner-modal-fixed"
+        class="fixed inset-0 bg-black bg-opacity-80 z-[9999] flex items-center justify-center p-4 hidden">
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
             <div class="px-5 py-4 border-b flex justify-between items-center">
                 <h3 class="font-bold text-lg text-slate-800">Plot Scanner</h3>
@@ -523,10 +523,10 @@
             const toast = document.getElementById('toast');
             const cropperModal = document.getElementById('cropper-modal');
             const imageToCrop = document.getElementById('image-to-crop');
-            const cameraModal = document.getElementById('camera-modal');
+            const cameraModal = document.getElementById('camera-modal-fixed');
             const videoElement = document.getElementById('camera-stream');
             const canvasElement = document.getElementById('camera-canvas');
-            const qrScannerModal = document.getElementById('qr-scanner-modal');
+            const qrScannerModal = document.getElementById('qr-scanner-modal-fixed');
             const qrVideo = document.getElementById('qr-video');
             let cropper = null;
             let cameraStream = null;
@@ -5250,7 +5250,7 @@ Respond ONLY with a single minified JSON object in this format: {"identification
             const scannerCtx = scannerCanvas.getContext("2d");
 
             function openQrScanner() {
-                const modal = document.getElementById('qr-scanner-modal');
+                const modal = document.getElementById('qr-scanner-modal-fixed');
                 const video = document.getElementById('qr-video');
                 if (!modal || !video) return;
 
@@ -5307,7 +5307,7 @@ Respond ONLY with a single minified JSON object in this format: {"identification
             }
 
             function closeQrScanner() {
-                const modal = document.getElementById('qr-scanner-modal');
+                const modal = document.getElementById('qr-scanner-modal-fixed');
                 const video = document.getElementById('qr-video');
 
                 if (modal) modal.classList.add('hidden');
@@ -5327,7 +5327,7 @@ Respond ONLY with a single minified JSON object in this format: {"identification
 
             function scanQrTick() {
                 const video = document.getElementById('qr-video');
-                const modal = document.getElementById('qr-scanner-modal');
+                const modal = document.getElementById('qr-scanner-modal-fixed');
 
                 // Stop if modal is closed
                 if (!modal || modal.classList.contains('hidden')) return;
