@@ -2393,7 +2393,8 @@
                 try {
                     cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
                     videoElement.srcObject = cameraStream;
-                    cameraModal.style.display = 'block';
+                    cameraModal.classList.remove('hidden');
+                    cameraModal.style.display = 'flex'; // FORCE FLEX for centering
                 } catch (err) {
                     console.error("Camera Error:", err);
                     showToast("Could not access camera. Check browser permissions.", 'error');
