@@ -390,13 +390,13 @@
 
     <!-- Camera Modal -->
     <div id="camera-modal"
-        class="fixed inset-0 bg-black bg-opacity-80 z-50 flex items-center justify-center p-4 hidden">
-        <div
-            class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col animate-in fade-in zoom-in duration-200">
+        class="fixed inset-0 bg-black bg-opacity-80 z-[100] flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
             <div class="px-5 py-4 border-b">
                 <h3 class="font-bold text-lg text-slate-800">Live Camera</h3>
             </div>
-            <div class="relative bg-black aspect-[3/4] w-full items-center justify-center flex overflow-hidden">
+            <div
+                class="relative bg-black w-full h-[60vh] md:h-[500px] flex items-center justify-center overflow-hidden">
                 <video id="camera-stream" autoplay playsinline class="w-full h-full object-cover"></video>
                 <canvas id="camera-canvas" class="hidden"></canvas>
             </div>
@@ -411,19 +411,18 @@
 
     <!-- QR Scanner Modal -->
     <div id="qr-scanner-modal"
-        class="fixed inset-0 bg-black bg-opacity-80 z-50 flex items-center justify-center p-4 hidden">
-        <div
-            class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col animate-in fade-in zoom-in duration-200">
+        class="fixed inset-0 bg-black bg-opacity-80 z-[100] flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
             <div class="px-5 py-4 border-b flex justify-between items-center">
                 <h3 class="font-bold text-lg text-slate-800">Plot Scanner</h3>
             </div>
-            <div class="relative bg-black aspect-square w-full items-center justify-center flex overflow-hidden">
+            <div class="relative bg-black w-full aspect-square flex items-center justify-center overflow-hidden">
                 <video id="qr-video" autoplay playsinline class="w-full h-full object-cover"></video>
                 <!-- Scanner Lines Overlay -->
-                <div class="scanner-frame z-10">
+                <div class="scanner-frame z-10 pointer-events-none">
                     <div class="scanner-line"></div>
                 </div>
-                <div class="absolute top-4 w-full text-center text-white px-6 z-10 drop-shadow-md">
+                <div class="absolute top-4 w-full text-center text-white px-6 z-10 drop-shadow-md pointer-events-none">
                     <p class="text-sm bg-black/50 px-3 py-1 rounded-full inline-block backdrop-blur-sm">Point at plot QR
                         code</p>
                 </div>
