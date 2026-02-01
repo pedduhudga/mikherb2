@@ -4379,7 +4379,19 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                 doc.text(`Location: ${trial.Location || 'N/A'}`, leftColX, y);
                 doc.text(`Dosage: ${trial.Dosage || 'N/A'}`, rightColX, y); y += 6;
                 doc.text(`Replication: ${trial.Replication || 'N/A'}`, leftColX, y);
-                doc.text(`Result: ${trial.Result || 'N/A'}`, rightColX, y); y += 10;
+                doc.text(`Result: ${trial.Result || 'N/A'}`, rightColX, y); y += 6;
+
+                // --- Weed Species ---
+                if (trial.WeedSpecies && trial.WeedSpecies.trim()) {
+                    doc.setFont(undefined, 'bold');
+                    doc.text(`Weed Species:`, leftColX, y);
+                    doc.setFont(undefined, 'normal');
+                    const weedLines = doc.splitTextToSize(trial.WeedSpecies, pageWidth - 28);
+                    doc.text(weedLines, leftColX, y + 5);
+                    y += (weedLines.length * 5) + 5;
+                }
+
+                y += 5; // Add spacing before weather section
 
                 // --- Weather ---
                 if (trial.Temperature) {
@@ -4426,9 +4438,18 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                         if (summaries.cover) {
                             doc.setFont(undefined, 'normal');
                             doc.setFontSize(9);
-                            const lines = doc.splitTextToSize("Analysis: " + summaries.cover, pageWidth - 28);
-                            doc.text(lines, 14, y);
-                            y += (lines.length * 5) + 10;
+                            const maxWidth = pageWidth - 28; // Left margin 14 + right margin 14
+                            const lines = doc.splitTextToSize("Analysis: " + summaries.cover, maxWidth);
+                            const textHeight = lines.length * 4; // 4mm per line for 9pt font
+
+                            // Check if text will fit on current page (leaving 20mm bottom margin)
+                            if (y + textHeight > 280) {
+                                doc.addPage();
+                                y = 20;
+                            }
+
+                            doc.text(lines, 14, y, { maxWidth: maxWidth, align: 'left' });
+                            y += textHeight + 10;
                         }
                     }
 
@@ -4449,9 +4470,18 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                         if (summaries.phyto) {
                             doc.setFont(undefined, 'normal');
                             doc.setFontSize(9);
-                            const lines = doc.splitTextToSize("Analysis: " + summaries.phyto, pageWidth - 28);
-                            doc.text(lines, 14, y);
-                            y += (lines.length * 5) + 10;
+                            const maxWidth = pageWidth - 28; // Left margin 14 + right margin 14
+                            const lines = doc.splitTextToSize("Analysis: " + summaries.phyto, maxWidth);
+                            const textHeight = lines.length * 4; // 4mm per line for 9pt font
+
+                            // Check if text will fit on current page (leaving 20mm bottom margin)
+                            if (y + textHeight > 280) {
+                                doc.addPage();
+                                y = 20;
+                            }
+
+                            doc.text(lines, 14, y, { maxWidth: maxWidth, align: 'left' });
+                            y += textHeight + 10;
                         }
                     }
                 }
@@ -4542,6 +4572,17 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                         doc.setFontSize(16);
                         doc.text("Weed Identification", 14, 20);
                         let weedY = 30;
+
+                        // Add weed species list at the top
+                        if (trial.WeedSpecies && trial.WeedSpecies.trim()) {
+                            doc.setFontSize(10);
+                            doc.setFont(undefined, 'bold');
+                            doc.text("Weed Species:", 14, weedY);
+                            doc.setFont(undefined, 'normal');
+                            const weedSpeciesLines = doc.splitTextToSize(trial.WeedSpecies, pageWidth - 28);
+                            doc.text(weedSpeciesLines, 14, weedY + 5);
+                            weedY += (weedSpeciesLines.length * 5) + 15;
+                        }
 
                         for (const p of weedPhotos) {
                             if (!p.url) continue;
@@ -5425,52 +5466,61 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                 // Initialize regeneration logic
                 const chartData = prepareTrialChartData(trial);
 
-                document.getElementById('regenerate-cover-summary').onclick = async () => {
-                    if (!chartData) return;
-                    coverInput.value = 'Regenerating summary...';
-                    const { coverDatasets, coverChartOptions, allWeedSpecies } = chartData;
+                const regenerateCoverBtn = document.getElementById('regenerate-cover-summary');
+                if (regenerateCoverBtn) {
+                    regenerateCoverBtn.onclick = async () => {
+                        if (!chartData) return;
+                        coverInput.value = 'Regenerating summary...';
+                        const { coverDatasets, coverChartOptions, allWeedSpecies } = chartData;
 
-                    // Create complete chart config object
-                    const coverChartConfig = {
-                        type: 'line',
-                        data: { datasets: coverDatasets },
-                        options: coverChartOptions
+                        // Create complete chart config object
+                        const coverChartConfig = {
+                            type: 'line',
+                            data: { datasets: coverDatasets },
+                            options: coverChartOptions
+                        };
+
+                        const summary = await getChartSummaryFromAI(coverChartConfig, '% Cover by Species', allWeedSpecies.join(', '), "Ongoing", trial.Result);
+                        coverInput.value = summary;
+                        saveSummary();
                     };
+                }
 
-                    const summary = await getChartSummaryFromAI(coverChartConfig, '% Cover by Species', allWeedSpecies.join(', '), "Ongoing", trial.Result);
-                    coverInput.value = summary;
-                    saveSummary();
-                };
+                const regeneratePhytoBtn = document.getElementById('regenerate-phyto-summary');
+                if (regeneratePhytoBtn) {
+                    regeneratePhytoBtn.onclick = async () => {
+                        if (!chartData) return;
+                        phytoInput.value = 'Regenerating summary...';
+                        const { phytoData, phytoChartOptions } = chartData;
 
-                document.getElementById('regenerate-phyto-summary').onclick = async () => {
-                    if (!chartData) return;
-                    phytoInput.value = 'Regenerating summary...';
-                    const { phytoData, phytoChartOptions } = chartData;
+                        // Create complete chart config object
+                        const phytoChartConfig = {
+                            type: 'line',
+                            data: { datasets: [phytoData] },
+                            options: phytoChartOptions
+                        };
 
-                    // Create complete chart config object
-                    const phytoChartConfig = {
-                        type: 'line',
-                        data: { datasets: [phytoData] },
-                        options: phytoChartOptions
+                        const summary = await getChartSummaryFromAI(phytoChartConfig, '% Phytotoxicity', 'Overall', "Ongoing", trial.Result);
+                        phytoInput.value = summary;
+                        saveSummary();
                     };
+                }
 
-                    const summary = await getChartSummaryFromAI(phytoChartConfig, '% Phytotoxicity', 'Overall', "Ongoing", trial.Result);
-                    phytoInput.value = summary;
-                    saveSummary();
-                };
-
-                document.getElementById('generate-pdf-from-preview').onclick = () => {
-                    // Capture canvas images
-                    const coverCanvas = document.getElementById('preview-cover-canvas');
-                    const phytoCanvas = document.getElementById('preview-phyto-canvas');
-                    const chartImages = {
-                        cover: coverCanvas ? coverCanvas.toDataURL('image/png') : null,
-                        phyto: phytoCanvas ? phytoCanvas.toDataURL('image/png') : null
+                const generatePdfBtn = document.getElementById('generate-pdf-from-preview');
+                if (generatePdfBtn) {
+                    generatePdfBtn.onclick = () => {
+                        // Capture canvas images
+                        const coverCanvas = document.getElementById('preview-cover-canvas');
+                        const phytoCanvas = document.getElementById('preview-phyto-canvas');
+                        const chartImages = {
+                            cover: coverCanvas ? coverCanvas.toDataURL('image/png') : null,
+                            phyto: phytoCanvas ? phytoCanvas.toDataURL('image/png') : null
+                        };
+                        const showPhotoDates = document.getElementById('show-photo-dates')?.checked || state.settings.showPhotoDates;
+                        const withTimeline = document.getElementById('include-timeline')?.checked || state.settings.includeTimeline;
+                        generateComprehensivePdf(trialId, { ...options, chartImages, showPhotoDates, withTimeline });
                     };
-                    const showPhotoDates = document.getElementById('show-photo-dates')?.checked || state.settings.showPhotoDates;
-                    const withTimeline = document.getElementById('include-timeline')?.checked || state.settings.includeTimeline;
-                    generateComprehensivePdf(trialId, { ...options, chartImages, showPhotoDates, withTimeline });
-                };
+                }
             }
 
             function openTrialDetail(id) {
