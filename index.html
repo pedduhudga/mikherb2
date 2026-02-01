@@ -656,7 +656,7 @@
                 try {
                     // Check for input in DOM first (for testing before save)
                     const modelInput = document.getElementById('settings-api-model');
-                    const modelId = modelInput ? modelInput.value : (state.settings.apiModel || 'gemini-2.5-flash-lite');
+                    const modelId = modelInput ? modelInput.value : (state.settings.apiModel || 'gemini-2.0-flash-exp');
 
                     showToast(`Testing ${modelId}...`, 'info');
                     const genAI = new GoogleGenAI({ apiKey: testKey });
@@ -751,8 +751,22 @@
                         return _callGeminiApiWithRetries(apiCallFunction, retries + 1);
                     }
 
+                    // Handle 500 - Internal server error (temporary error, retry after delay)
+                    if (errorMessage.includes('500') || errorMessage.includes('internal error') || errorMessage.includes('internal')) {
+                        if (retries < 3) { // Limit 500 retries to 3 attempts
+                            const retryDelay = 5000 + (retries * 3000); // 5s, 8s, 11s
+                            console.warn(`Gemini internal error (500). Retrying in ${retryDelay / 1000}s... (attempt ${retries + 1}/3)`);
+                            showToast(`AI server error. Retrying in ${retryDelay / 1000} seconds...`, 'info');
+                            await new Promise(resolve => setTimeout(resolve, retryDelay));
+                            return _callGeminiApiWithRetries(apiCallFunction, retries + 1);
+                        } else {
+                            throw new Error('API_ERROR: Gemini server experiencing internal errors after 3 retries. Please try again later.');
+                        }
+                    }
+
                     // For any other error, just throw it with more context
                     throw new Error(`API_ERROR: ${error.message}`);
+
                 }
             }
 
@@ -997,7 +1011,7 @@
                                         <select id="settings-api-model" class="w-full border rounded-md shadow-sm p-2 bg-white text-sm">
                                             <!-- Recommended -->
                                             <optgroup label="Recommended (High Free Quota)">
-                                                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite (1k RPD - Best)</option>
+                                                <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash Experimental (1.5k RPD - Best)</option>
                                                 <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite (1k RPD - Legacy)</option>
                                             </optgroup>
 
@@ -1026,7 +1040,7 @@
                                                 <option value="gemini-pro">Gemini 1.0 Pro</option>
                                             </optgroup>
                                         </select>
-                                        <p class="text-xs text-gray-500 mt-1">Select <b>2.5 Flash-Lite</b> for best free limits. Change if needed.</p>
+                                        <p class="text-xs text-gray-500 mt-1">Select <b>2.0 Flash-Exp</b> for best free limits (1,500 RPD). Change if needed.</p>
                                     </div>
                                     <div id="api-keys-container" class="mt-4 space-y-3">
                                         <!-- API key inputs will be rendered here -->
@@ -1718,7 +1732,7 @@
                             // API Model Selection
                             const modelSelect = document.getElementById('settings-api-model');
                             if (modelSelect) {
-                                modelSelect.value = state.settings.apiModel || 'gemini-2.5-flash-lite';
+                                modelSelect.value = state.settings.apiModel || 'gemini-2.0-flash-exp';
                             }
 
                             // API Quota Saver toggle
@@ -2368,14 +2382,71 @@
             }
 
             async function cropAndSaveImage() {
-                // Restore high quality (1.0) and remove size limits as requested
-                const croppedImageData = cropper.getCroppedCanvas().toDataURL('image/jpeg', 1.0);
+                let canvas = cropper.getCroppedCanvas();
+
+                // 1. DIMENSION SCALING: If photo is massive, shrink it to a reasonable high-res limit (2000px)
+                // This reduces the pixel count and makes compression MUCH more effective.
+                const MAX_DIM = 2000;
+                if (canvas.width > MAX_DIM || canvas.height > MAX_DIM) {
+                    const scale = MAX_DIM / Math.max(canvas.width, canvas.height);
+                    const scaledCanvas = document.createElement('canvas');
+                    scaledCanvas.width = canvas.width * scale;
+                    scaledCanvas.height = canvas.height * scale;
+                    const ctx = scaledCanvas.getContext('2d');
+                    ctx.drawImage(canvas, 0, 0, scaledCanvas.width, scaledCanvas.height);
+                    canvas = scaledCanvas;
+                    console.log(`[Compression] Scaled dimensions to ${canvas.width}x${canvas.height}`);
+                }
+
+                let quality = 0.9;
+                let croppedImageData = canvas.toDataURL('image/jpeg', quality);
+
+                // Target: ~1.2MB (Approx 1,600,000 chars in Base64)
+                const MAX_BASE64_SIZE = 1600000;
+
+                if (croppedImageData.length > MAX_BASE64_SIZE) {
+                    console.log(`[Compression] Initial size ${Math.round(croppedImageData.length / 1024)}KB. Iterating...`);
+                    while (croppedImageData.length > MAX_BASE64_SIZE && quality > 0.4) {
+                        quality -= 0.1;
+                        croppedImageData = canvas.toDataURL('image/jpeg', quality);
+                        console.log(`[Compression] Quality: ${quality.toFixed(1)} | Size: ${Math.round(croppedImageData.length / 1024)}KB`);
+                    }
+                }
+
                 const trialId = state.currentTrialIdForCamera;
-                const currentCameraMode = state.cameraMode; // Save the mode before it could be changed
+                const currentCameraMode = state.cameraMode;
                 closeCropper();
 
                 const form = document.getElementById('trial-form');
                 let photoDate = form ? form.querySelector('#photo-date').value : new Date().toISOString().split('T')[0];
+
+                let weatherData = state.tempPhotoWeather || null;
+                if (!weatherData && trialId) {
+                    try {
+                        const trial = state.trials.find(t => t.ID === trialId);
+                        let locStr = trial ? (trial.Location || '') : '';
+                        let lat, lon;
+                        if (locStr.includes(',')) [lat, lon] = locStr.split(',').map(s => s.trim());
+
+                        if (!lat || !lon) {
+                            const pos = await new Promise(resolve => {
+                                if (navigator.geolocation) {
+                                    navigator.geolocation.getCurrentPosition(
+                                        p => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
+                                        () => resolve(null),
+                                        { timeout: 3000 }
+                                    );
+                                } else resolve(null);
+                            });
+                            if (pos) { lat = pos.lat; lon = pos.lon; }
+                        }
+
+                        if (lat && lon) {
+                            showToast('Fetching weather for photo...', 'info');
+                            weatherData = await fetchWeather(lat, lon, photoDate);
+                        }
+                    } catch (e) { console.warn("Auto-weather fetch failed during save:", e); }
+                }
 
                 const photoData = {
                     fileData: croppedImageData,
@@ -2383,12 +2454,11 @@
                     mimeType: 'image/jpeg',
                     label: '',
                     date: photoDate,
-                    weather: null,
+                    weather: weatherData,
                     tempId: `photo_${Date.now()}`
                 };
 
                 if (trialId) {
-                    // IMPORTANT: ADD TO SYNC QUEUE IMMEDIATELY
                     const syncItem = {
                         id: `sync_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
                         trialId: trialId,
@@ -2399,54 +2469,33 @@
                         lastError: null
                     };
 
-                    // Add to global sync queue
                     state.syncQueue.push(syncItem);
                     saveSyncQueue();
 
-                    // Immediate Update: Add to local state for instant visibility
                     const trial = state.trials.find(t => t.ID === trialId);
                     if (trial) {
                         if (currentCameraMode === 'weed') {
                             const weedPhotos = safeJsonParse(trial.WeedPhotosJSON);
-                            weedPhotos.push({
-                                url: '', // No URL yet
-                                tempId: syncItem.photo.tempId,
-                                fileData: syncItem.photo.fileData, // Local preview
-                                date: syncItem.photo.date,
-                                identifications: null, // Loading indicator
-                                label: "Processing..."
-                            });
+                            weedPhotos.push({ url: '', tempId: syncItem.photo.tempId, fileData: syncItem.photo.fileData, date: syncItem.photo.date, identifications: null, label: "Processing..." });
                             trial.WeedPhotosJSON = JSON.stringify(weedPhotos);
                         } else {
                             const generalPhotos = safeJsonParse(trial.PhotoURLs);
-                            generalPhotos.push({
-                                url: '',
-                                tempId: syncItem.photo.tempId,
-                                fileData: syncItem.photo.fileData, // Local preview
-                                date: syncItem.photo.date,
-                                label: "Processing...",
-                                weather: null
-                            });
+                            generalPhotos.push({ url: '', tempId: syncItem.photo.tempId, fileData: syncItem.photo.fileData, date: syncItem.photo.date, label: "Processing...", weather: weatherData });
                             trial.PhotoURLs = JSON.stringify(generalPhotos);
                         }
                     }
 
-                    // Refresh UI immediately
-                    const modal = document.getElementById('weed-modal');
-                    if (modal && currentCameraMode === 'weed') {
+                    if (document.getElementById('weed-modal') && currentCameraMode === 'weed') {
                         const trialData = state.trials.find(t => t.ID === trialId);
                         document.getElementById('weed-photo-grid').innerHTML = safeJsonParse(trialData.WeedPhotosJSON).map((p, i) => render.weedPhotoCard(p, trialId, i)).join('');
-                    } else {
-                        applyFilters(); // Re-render trial cards
-                    }
+                    } else applyFilters();
 
-                    // Trigger Background Sync
                     processSyncQueue();
-                } else { // Adding from inside the main trial modal
+                } else {
                     state.croppedPhotosData.push(photoData);
                     updatePhotoPreview();
                 }
-                state.cameraMode = 'general'; // Reset after async operations complete
+                state.cameraMode = 'general';
             }
 
             async function openCamera(trialId = null) {
@@ -2618,7 +2667,7 @@
                     - "notes": A brief qualitative observation.`;
 
                     const geminiCall = (genAI) => genAI.models.generateContent({
-                        model: state.settings.apiModel || 'gemini-2.5-flash-lite',
+                        model: state.settings.apiModel || 'gemini-2.0-flash-exp',
                         contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: mimeType, data: fileData.split(',')[1] } }] }],
                         config: {
                             responseMimeType: "application/json",
@@ -2677,7 +2726,7 @@ IMPORTANT: Identify EVERY distinct weed species visible in the photo, not just t
 Respond ONLY with a single minified JSON object in this format: {"identifications": [{"name": "Scientific Name", "commonNames": ["Common Name 1", ...], "confidence": 0.95, "growthStage": "Seedling|Vegetative|Flowering|Mature"}]}`;
 
                     const geminiCall = (genAI) => genAI.models.generateContent({
-                        model: state.settings.apiModel || 'gemini-2.5-flash-lite',
+                        model: state.settings.apiModel || 'gemini-2.0-flash-exp',
                         contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: mimeType, data: fileData.split(',')[1] } }] }],
                         config: {
                             responseMimeType: "application/json",
@@ -2742,6 +2791,7 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                 const results = [];
                 for (const photoData of photosData) {
                     try {
+                        if (!state.settings.folderId) throw new Error("Folder ID missing. Check Settings.");
                         const result = await apiCall('uploadPhoto', {
                             fileData: photoData.fileData,
                             fileName: photoData.fileName,
@@ -2761,6 +2811,52 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                         url: result.url
                     };
                 }).filter(Boolean);
+            }
+
+            function handlePhotoEditSubmit(form) {
+                const trialId = form.querySelector('[name="trialId"]').value;
+                const photoIndex = parseInt(form.querySelector('[name="photoIndex"]').value);
+                const trial = state.trials.find(t => t.ID === trialId);
+                if (!trial) return;
+
+                const photos = safeJsonParse(trial.PhotoURLs);
+                const photo = photos[photoIndex];
+                if (photo) {
+                    // Extract values with trimming to ensure cleanliness
+                    const newLabel = (form.querySelector('[name="label"]').value || '').trim();
+                    const newDate = form.querySelector('[name="date"]').value;
+                    const wTemp = (form.querySelector('[name="temp"]').value || '').trim();
+                    const wHum = (form.querySelector('[name="humidity"]').value || '').trim();
+                    const wWind = (form.querySelector('[name="wind"]').value || '').trim();
+                    const wRain = (form.querySelector('[name="rain"]').value || '').trim();
+
+                    // Update local state immediately
+                    photo.label = newLabel;
+                    photo.date = newDate;
+
+                    // Explicitly update weather object
+                    photo.weather = {
+                        temp: wTemp,
+                        humidity: wHum,
+                        wind: wWind,
+                        rain: wRain
+                    };
+
+                    trial.PhotoURLs = JSON.stringify(photos);
+
+                    // Optimistic UI Update: Close and refresh immediately
+                    showToast('Photo details updated.', 'success');
+                    closeModal();
+                    openTrialDetail(trialId);
+
+                    // Background Sync
+                    // We do NOT wait for this to finish before closing UI
+                    apiCall('updateTrialRecord', { ID: trialId, PhotoURLs: trial.PhotoURLs }, false)
+                        .catch(err => {
+                            console.error('Background sync failed:', err);
+                            showToast('Warning: Changes saved locally but sync failed. Please check connection.', 'warning');
+                        });
+                }
             }
 
             function handleOpenPhotoEditModal(trialId, photoIndex) {
@@ -2792,6 +2888,34 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                         form.querySelector('[name="wind"]').value = photo.weather.wind || '';
                         form.querySelector('[name="rain"]').value = photo.weather.rain || '';
                     }
+
+                    // Add listener for date change in edit modal
+                    const dateInput = form.querySelector('[name="date"]');
+                    dateInput.addEventListener('change', async () => {
+                        const newDate = dateInput.value;
+                        if (!newDate) return;
+
+                        // Try to get location from trial
+                        const locationStr = trial.Location || '';
+                        let lat, lon;
+                        if (locationStr.includes(',')) {
+                            [lat, lon] = locationStr.split(',').map(s => s.trim());
+                        }
+
+                        if (lat && lon) {
+                            showToast('Fetching weather for new date...', 'info');
+                            const w = await fetchWeather(lat, lon, newDate);
+                            if (w) {
+                                form.querySelector('[name="temp"]').value = w.temp || '';
+                                form.querySelector('[name="humidity"]').value = w.humidity || '';
+                                form.querySelector('[name="wind"]').value = w.wind || '';
+                                form.querySelector('[name="rain"]').value = w.rain || '';
+                                showToast('Weather updated.', 'success');
+                            }
+                        } else {
+                            showToast('Trial has no location. Cannot fetch weather.', 'warning');
+                        }
+                    });
                 }, 50);
             }
 
@@ -2959,7 +3083,7 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                             if (isWeed) {
                                 placeholder.identifications = null;
                             } else {
-                                placeholder.weather = null;
+                                placeholder.weather = item.photo.weather || null;
                             }
                             photos.push(placeholder);
                             if (isWeed) trial.WeedPhotosJSON = JSON.stringify(photos);
@@ -3043,7 +3167,7 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                     scriptUrl: DEFAULT_SCRIPT_URL,
                     sheetId: DEFAULT_SHEET_ID,
                     folderId: DEFAULT_FOLDER_ID,
-                    apiModel: 'gemini-1.5-flash-lite',
+                    apiModel: 'gemini-2.0-flash-exp',
                     autoAnalyzePhotos: false,
                     showPhotoDates: false,
                     includeTimeline: false,
@@ -3782,6 +3906,59 @@ Respond ONLY with a single minified JSON object in this format: {"identification
 
                 controlFinalizedCheckbox?.addEventListener('change', updateFinalizationDate);
                 updateFinalizationDate(); // Initial check
+
+                // Add Photo Date Listener for Weather Fetching
+                const photoDateInput = form.querySelector('#photo-date');
+                if (photoDateInput) {
+                    photoDateInput.addEventListener('change', async () => {
+                        const date = photoDateInput.value;
+                        const locationStr = form.querySelector('[name="location"]').value;
+
+                        if (!date || !locationStr) return;
+
+                        let lat, lon;
+                        if (locationStr.includes(',')) {
+                            [lat, lon] = locationStr.split(',').map(s => s.trim());
+                        }
+
+                        if (lat && lon) {
+                            showToast(`Fetching weather for ${date}...`, 'info');
+                            const w = await fetchWeather(lat, lon, date);
+                            if (w) {
+                                state.tempPhotoWeather = w;
+                                showToast('Weather captured for photo.', 'success');
+                            }
+                        }
+                    });
+                }
+
+                // Add Main Trial Date Listener for Weather Fetching
+                const trialDateInput = form.querySelector('[name="date"]');
+                if (trialDateInput) {
+                    trialDateInput.addEventListener('change', async () => {
+                        const date = trialDateInput.value;
+                        const locationStr = form.querySelector('[name="location"]').value;
+
+                        if (!date || !locationStr) return;
+
+                        let lat, lon;
+                        if (locationStr.includes(',')) {
+                            [lat, lon] = locationStr.split(',').map(s => s.trim());
+                        }
+
+                        if (lat && lon) {
+                            showToast(`Updating trial weather for ${date}...`, 'info');
+                            const w = await fetchWeather(lat, lon, date);
+                            if (w) {
+                                form.querySelector('[name="temperature"]').value = w.temp || '';
+                                form.querySelector('[name="humidity"]').value = w.humidity || '';
+                                form.querySelector('[name="windspeed"]').value = w.wind || '';
+                                form.querySelector('[name="rain"]').value = w.rain || '';
+                                showToast('Trial weather updated.', 'success');
+                            }
+                        }
+                    });
+                }
             }
 
             function getChartDefaults() {
@@ -4109,6 +4286,12 @@ Respond ONLY with a single minified JSON object in this format: {"identification
             const aiSummaryCache = new Map();
 
             async function getChartSummaryFromAI(chartConfig, chartTitle, seriesName, trialStatus = "Ongoing", userResult = "") {
+                // Validate input
+                if (!chartConfig || !chartConfig.data || !chartConfig.data.datasets) {
+                    console.error('[AI Summary] Invalid chart config:', chartConfig);
+                    return "Chart data not available for AI analysis.";
+                }
+
                 // Create a cache key based on chart data and title
                 const datasets = chartConfig.data.datasets.map(ds => ({
                     label: ds.label,
@@ -4148,7 +4331,7 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                     - If finalized, state a clear conclusion on efficacy based on the User's Verdict and data.`;
 
                     const geminiCall = (genAI) => genAI.models.generateContent({
-                        model: state.settings.apiModel || 'gemini-2.5-flash-lite',
+                        model: state.settings.apiModel || 'gemini-2.0-flash-exp',
                         contents: [{ parts: [{ text: prompt }] }]
                     });
 
@@ -4645,22 +4828,131 @@ Respond ONLY with a single minified JSON object in this format: {"identification
             }
 
             // --- MISSING HELPERS ---
-            function fetchWeatherForTrialDate() {
+            async function fetchWeather(lat, lon, date) {
+                let url = ''; // Define outer scope for error logging
+                try {
+                    // 1. Strict Input Validation
+                    const latNum = parseFloat(lat);
+                    const lonNum = parseFloat(lon);
+                    if (!lat || !lon || isNaN(latNum) || isNaN(lonNum)) {
+                        console.error("fetchWeather: Invalid coordinates:", lat, lon);
+                        return null;
+                    }
+                    // Validate date format YYYY-MM-DD
+                    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+                    if (!date || typeof date !== 'string' || !dateRegex.test(date)) {
+                        console.error("fetchWeather: Invalid date format:", date);
+                        return null;
+                    }
+
+                    const targetDate = new Date(date);
+                    if (isNaN(targetDate.getTime())) {
+                        console.error("fetchWeather: Invalid Date object:", date);
+                        return null;
+                    }
+
+                    const today = new Date();
+                    today.setHours(0, 0, 0, 0);
+
+                    // Calculate age of date in days
+                    const diffTime = today - targetDate;
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+                    // Logic:
+                    // 1. > 14 days ago: Use Archive API (Forecast API implicit history is limited/unreliable beyond ~30 days)
+                    // 2. Recent Past (<= 14 days) & Future: Use Forecast API
+
+                    const isOldArchive = diffDays > 14;
+                    const dateStr = date; // YYYY-MM-DD
+
+                    if (isOldArchive) {
+                        url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&start_date=${dateStr}&end_date=${dateStr}&daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,rain_sum&timezone=auto`;
+                    } else {
+                        // Use Forecast API (it automatically covers recent past up to 92 days if specific dates are requested)
+                        url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,rain_sum&start_date=${dateStr}&end_date=${dateStr}&timezone=auto`;
+                    }
+
+                    const res = await fetch(url);
+                    if (!res.ok) {
+                        const errData = await res.json().catch(() => ({}));
+                        console.error('Weather API Error Detail:', errData);
+                        throw new Error(`Weather API Error: ${res.status}${errData.reason ? ' - ' + errData.reason : ''}`);
+                    }
+                    const data = await res.json();
+
+                    if (data.daily && data.daily.time && data.daily.time.length > 0) {
+                        console.log('Weather API Response Dates:', data.daily.time, 'Looking for:', dateStr);
+
+                        // Find the index that matches our requested date
+                        // The API returns an array, and sometimes handles timezones by shifting the day.
+                        // We trust the query 'start_date' usually, but finding the exact string match is safest.
+                        const index = data.daily.time.findIndex(t => t === dateStr);
+
+                        // Fallback: Use 0 if single day requested and match not found (typical response)
+                        // But if 0 is "Today" and we asked for "Yesterday", we must be careful.
+                        // If index is -1, it means the API didn't return the requested date.
+
+                        const safeIndex = index !== -1 ? index : 0; // WARNING: This might be the bug if index is -1
+
+                        if (index === -1) {
+                            console.warn('Weather date mismatch! API returned:', data.daily.time[0], 'Expected:', dateStr);
+                        }
+
+                        // Sanity check: if returned date is not what we asked for, and we are in strict mode
+                        if (index === -1 && data.daily.time[0] !== dateStr) {
+                            // If the mismatch is significant, return null.
+                            if (Math.abs(new Date(data.daily.time[0]) - targetDate) > 86400000) {
+                                console.error('Weather date mismatch too large. Aborting.');
+                                return null;
+                            }
+                        }
+
+                        return {
+                            temp: data.daily.temperature_2m_max[safeIndex],
+                            humidity: data.daily.relative_humidity_2m_mean[safeIndex],
+                            wind: data.daily.wind_speed_10m_max[safeIndex],
+                            rain: data.daily.rain_sum[safeIndex]
+                        };
+                    }
+                    return null;
+                } catch (e) {
+                    console.error("Weather fetch failed:", e);
+                    console.error("Failed URL:", url);
+                    showToast('Could not fetch weather data.', 'error');
+                    return null;
+                }
+            }
+
+            async function fetchWeatherForTrialDate() {
                 const location = document.querySelector('[name="location"]').value;
                 const date = document.querySelector('[name="date"]').value;
                 if (!location || !date) return showToast('Enter location and date first.', 'error');
 
-                // Mock weather fetch
-                document.querySelector('[name="temperature"]').value = (25 + Math.random() * 5).toFixed(1);
-                document.querySelector('[name="humidity"]').value = (60 + Math.random() * 20).toFixed(0);
-                document.querySelector('[name="windspeed"]').value = (10 + Math.random() * 15).toFixed(1);
-                document.querySelector('[name="rain"]').value = (Math.random() * 5).toFixed(1);
-                showToast('Weather data fetched (simulated).', 'success');
+                let lat, lon;
+                if (location.includes(',')) {
+                    [lat, lon] = location.split(',').map(s => s.trim());
+                }
+
+                if (lat && lon) {
+                    showToast('Fetching weather...', 'info');
+                    const w = await fetchWeather(lat, lon, date);
+                    if (w) {
+                        document.querySelector('[name="temperature"]').value = w.temp || '';
+                        document.querySelector('[name="humidity"]').value = w.humidity || '';
+                        document.querySelector('[name="windspeed"]').value = w.wind || '';
+                        document.querySelector('[name="rain"]').value = w.rain || '';
+                        showToast('Weather updated from Open-Meteo.', 'success');
+                    }
+                } else {
+                    showToast('Invalid location format (lat,lon required).', 'error');
+                }
             }
 
             function fetchWeatherForObservation(index) {
-                // Similar mock
-                showToast('Weather data fetched (simulated).', 'success');
+                // Determine context: are we inside the modal or card?
+                // This logic might need to traverse DOM to find date/location
+                // For now, keep as placeholder or implement if observation has location context
+                showToast('Observation weather fetch not linked to location yet.', 'info');
             }
 
             async function handleToggleCompleted(id, isChecked) {
@@ -4752,15 +5044,18 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                         }
 
                         // Need to fetch the photo as base64 for analysis
-                        showToast(`Analyzing photo ${photosAnalyzed + 1}/${photos.length}...`, 'info');
+                        const photoNum = photos.indexOf(photo) + 1;
+                        console.log(`[Analysis] Processing photo ${photoNum}/${photos.length}`);
+                        showToast(`Analyzing photo ${photoNum}/${photos.length}...`, 'info');
 
                         // Fetch photo and convert to base64
                         const photoData = await fetchPhotoAsBase64(photo.url);
                         if (!photoData) {
-                            console.error('Could not fetch photo:', photo.url);
+                            console.error(`[Analysis] Skipping photo ${photoNum} - fetch failed`);
                             continue;
                         }
 
+                        console.log(`[Analysis] Sending photo ${photoNum} to Gemini AI...`);
                         const efficacyResult = await analyzePhotoForEfficacy(photoData.fileData, photoData.mimeType);
                         if (efficacyResult) {
                             const observationDate = new Date(photo.date || trial.Date);
@@ -4778,36 +5073,74 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                             });
                             aiAnalysisComplete = true;
                             photosAnalyzed++;
+                            console.log(`[Analysis] ✔ Photo ${photoNum} complete | Total analyzed: ${photosAnalyzed}`);
+                        } else {
+                            console.warn(`[Analysis] Photo ${photoNum} returned no data`);
                         }
                     } catch (err) {
-                        console.error('Photo analysis failed:', err);
+                        console.error(`[Analysis] Photo analysis failed:`, err);
                         showToast(`Analysis failed: ${err.message}`, 'error');
-                        if (err.message === 'QUOTA_EXCEEDED' || err.message === 'ALL_KEYS_EXHAUSTED') {
+                        if (err.message.includes('QUOTA_EXCEEDED') || err.message.includes('ALL_KEYS_EXHAUSTED')) {
+                            console.error('[Analysis] Quota exhausted - stopping analysis');
                             showToast('API Quota exhausted. Try again later.', 'error');
                             break;
                         }
                     }
                 }
 
+                console.log(`[Analysis] Complete | Photos analyzed: ${photosAnalyzed} | AI complete: ${aiAnalysisComplete}`);
+
                 if (aiAnalysisComplete) {
                     trial.EfficacyDataJSON = JSON.stringify(efficacyData);
                     trial.AISummariesJSON = '{}'; // Clear cached summaries
 
-                    const result = await apiCall('updateTrialRecord', {
-                        ID: id,
-                        EfficacyDataJSON: trial.EfficacyDataJSON,
-                        AISummariesJSON: '{}'
-                    }, true);
+                    const payloadSize = Math.round(trial.EfficacyDataJSON.length / 1024);
+                    console.log(`[Analysis] Saving results to spreadsheet | Payload: ${payloadSize}KB | Records: ${efficacyData.length}`);
 
-                    if (result) {
+                    showToast('Saving analysis results to spreadsheet...', 'info');
+
+                    let saveAttempts = 0;
+                    let result = null;
+
+                    while (saveAttempts < 2 && !result) {
+                        try {
+                            result = await apiCall('updateTrialRecord', {
+                                ID: id,
+                                EfficacyDataJSON: trial.EfficacyDataJSON,
+                                AISummariesJSON: '{}'
+                            }, true);
+
+                            if (result && !result._errType) {
+                                console.log('[Analysis] ✅ Save successful');
+                                break;
+                            } else if (result && result._errType) {
+                                throw new Error(result.message);
+                            }
+                        } catch (err) {
+                            saveAttempts++;
+                            console.error(`[Analysis] Save attempt ${saveAttempts} failed:`, err);
+
+                            if (saveAttempts < 2) {
+                                showToast(`Save failed. Retrying (${saveAttempts}/2)...`, 'info');
+                                await new Promise(resolve => setTimeout(resolve, 3000));
+                            }
+                        }
+                    }
+
+                    if (result && !result._errType) {
                         showToast(`Efficacy analysis complete! Analyzed ${photosAnalyzed} photo(s). Opening report...`, 'success');
                         applyFilters();
                         // Open the trial detail view to show the analysis results
                         setTimeout(() => openTrialDetail(id), 500);
                     } else {
-                        showToast('Failed to save analysis results.', 'error');
+                        console.error('[Analysis] All save attempts failed');
+                        showToast(`Analysis completed but failed to save to spreadsheet. Data size: ${payloadSize}KB. Try analyzing fewer photos at once.`, 'error');
+                        // Save locally so work isn't lost
+                        localStorage.setItem(`temp_analysis_${id}`, trial.EfficacyDataJSON);
+                        console.log(`[Analysis] Results backed up to localStorage: temp_analysis_${id}`);
                     }
                 } else {
+                    console.log('[Analysis] No new photos analyzed');
                     showToast('No new photos to analyze. All photos already have efficacy data.', 'info');
                     // Still open the trial detail to show existing data
                     openTrialDetail(id);
@@ -4817,22 +5150,35 @@ Respond ONLY with a single minified JSON object in this format: {"identification
             // Helper function to fetch a photo URL and convert to base64
             async function fetchPhotoAsBase64(url) {
                 try {
+                    console.log(`[Photo Fetch] Starting fetch for: ${url}`);
                     // Use the proxy to avoid CORS issues
                     const proxiedUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&output=jpg`;
+                    const fetchStart = Date.now();
                     const response = await fetch(proxiedUrl);
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+
                     const blob = await response.blob();
+                    const fetchTime = ((Date.now() - fetchStart) / 1000).toFixed(2);
+                    console.log(`[Photo Fetch] Downloaded in ${fetchTime}s | Size: ${Math.round(blob.size / 1024)}KB`);
 
                     return new Promise((resolve, reject) => {
                         const reader = new FileReader();
-                        reader.onload = () => resolve({
-                            fileData: reader.result,
-                            mimeType: blob.type || 'image/jpeg'
-                        });
+                        reader.onload = () => {
+                            console.log(`[Photo Fetch] Converted to Base64 | Total: ${((Date.now() - fetchStart) / 1000).toFixed(2)}s`);
+                            resolve({
+                                fileData: reader.result,
+                                mimeType: blob.type || 'image/jpeg'
+                            });
+                        };
                         reader.onerror = reject;
                         reader.readAsDataURL(blob);
                     });
                 } catch (error) {
-                    console.error('Error fetching photo as base64:', error);
+                    console.error(`[Photo Fetch] FAILED for ${url}:`, error.message);
+                    showToast(`Failed to fetch photo: ${error.message}`, 'error');
                     return null;
                 }
             }
@@ -4928,9 +5274,22 @@ Respond ONLY with a single minified JSON object in this format: {"identification
 
                 const photos = safeJsonParse(trial.PhotoURLs);
                 if (photos[photoIndex]) {
-                    photos[photoIndex].label = form.querySelector('[name="label"]').value;
+                    photos[photoIndex].label = form.querySelector('[name="label"]').value || '';
                     photos[photoIndex].date = form.querySelector('[name="date"]').value;
-                    // Update weather if changed...
+
+                    // Capture weather fields explicitly
+                    const wTemp = form.querySelector('[name="temp"]').value;
+                    const wHum = form.querySelector('[name="humidity"]').value;
+                    const wWind = form.querySelector('[name="wind"]').value;
+                    const wRain = form.querySelector('[name="rain"]').value;
+
+                    // Ensure weather object exists and is populated
+                    photos[photoIndex].weather = {
+                        temp: wTemp,
+                        humidity: wHum,
+                        wind: wWind,
+                        rain: wRain
+                    };
 
                     trial.PhotoURLs = JSON.stringify(photos);
                     apiCall('updateTrialRecord', { id: trialId, PhotoURLs: trial.PhotoURLs }, false);
@@ -5069,8 +5428,16 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                 document.getElementById('regenerate-cover-summary').onclick = async () => {
                     if (!chartData) return;
                     coverInput.value = 'Regenerating summary...';
-                    const { coverChartOptions, allWeedSpecies } = chartData;
-                    const summary = await getChartSummaryFromAI(coverChartOptions, '% Cover by Species', allWeedSpecies.join(', '), "Ongoing", trial.Result);
+                    const { coverDatasets, coverChartOptions, allWeedSpecies } = chartData;
+
+                    // Create complete chart config object
+                    const coverChartConfig = {
+                        type: 'line',
+                        data: { datasets: coverDatasets },
+                        options: coverChartOptions
+                    };
+
+                    const summary = await getChartSummaryFromAI(coverChartConfig, '% Cover by Species', allWeedSpecies.join(', '), "Ongoing", trial.Result);
                     coverInput.value = summary;
                     saveSummary();
                 };
@@ -5078,8 +5445,16 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                 document.getElementById('regenerate-phyto-summary').onclick = async () => {
                     if (!chartData) return;
                     phytoInput.value = 'Regenerating summary...';
-                    const { phytoChartOptions } = chartData;
-                    const summary = await getChartSummaryFromAI(phytoChartOptions, '% Phytotoxicity', 'Overall', "Ongoing", trial.Result);
+                    const { phytoData, phytoChartOptions } = chartData;
+
+                    // Create complete chart config object
+                    const phytoChartConfig = {
+                        type: 'line',
+                        data: { datasets: [phytoData] },
+                        options: phytoChartOptions
+                    };
+
+                    const summary = await getChartSummaryFromAI(phytoChartConfig, '% Phytotoxicity', 'Overall', "Ongoing", trial.Result);
                     phytoInput.value = summary;
                     saveSummary();
                 };
@@ -5591,22 +5966,35 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                 if (_isSyncProcessing || state.syncQueue.length === 0) return;
                 _isSyncProcessing = true;
 
-                console.log(`[HighTechSync] Starting queue process. Count: ${state.syncQueue.length}`);
+                const queueStartTime = Date.now();
+                console.log(`%c[HighTechSync] 🚀 Starting Sync Process | Queue: ${state.syncQueue.length} items`, "color: #0d9488; font-weight: bold; font-size: 1.1em;");
                 renderSyncStatus();
 
-                // Get items that need work, priority to 'uploading' then 'pending/failed'
-                const itemsToProcess = state.syncQueue.filter(item =>
+                let itemsToProcess = state.syncQueue.filter(item =>
                     item.status === 'pending' ||
                     item.status === 'failed' ||
                     item.status === 'uploading'
                 );
 
-                for (const item of itemsToProcess) {
-                    if (!navigator.onLine) break;
+                let isFirstItem = true;
 
-                    // Incremental backoff: Wait longer if we have failed multiple times
-                    const waitTime = Math.min(10000, 1000 + ((item.attempts || 0) * 2000));
-                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                for (const item of itemsToProcess) {
+                    if (!navigator.onLine) {
+                        console.warn("[HighTechSync] 📵 Offline detected. Pausing sync.");
+                        break;
+                    }
+
+                    const itemStartTime = Date.now();
+                    const itemLabel = item.photo.fileName || item.id;
+
+                    if (!isFirstItem || (item.attempts || 0) > 0) {
+                        const waitTime = Math.min(10000, (isFirstItem ? 0 : 500) + ((item.attempts || 0) * 2000));
+                        if (waitTime > 0) {
+                            console.log(`[HighTechSync] Waiting ${waitTime}ms (backoff)...`);
+                            await new Promise(resolve => setTimeout(resolve, waitTime));
+                        }
+                    }
+                    isFirstItem = false;
 
                     // RE-CHECK DATA INTEGRITY
                     const trial = state.trials.find(t => t.ID === item.trialId);
@@ -5614,7 +6002,7 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                         const isWeed = item.type === 'weed_upload';
                         let photos = isWeed ? safeJsonParse(trial.WeedPhotosJSON) : safeJsonParse(trial.PhotoURLs);
                         if (photos.some(p => p.tempId === item.photo.tempId && p.url)) {
-                            console.log(`[HyperSync] Skipping ${item.id} - already successfully synced.`);
+                            console.log(`[HighTechSync] ✅ Already synced: ${itemLabel}`);
                             item.status = 'completed';
                             state.syncQueue = state.syncQueue.filter(i => i.id !== item.id);
                             saveSyncQueue();
@@ -5628,11 +6016,17 @@ Respond ONLY with a single minified JSON object in this format: {"identification
 
                     try {
                         const payloadSize = Math.round(item.photo.fileData.length / 1024);
-                        console.log(`[HyperSync] Syncing: ${item.trialId} | Size: ${payloadSize} KB | Attempt: ${(item.attempts || 0) + 1}`);
+                        console.group(`[Syncing Item] ${itemLabel} (${payloadSize} KB)`);
+                        console.log(`Start Time: ${new Date(itemStartTime).toLocaleTimeString()}`);
 
                         const isWeed = item.type === 'weed_upload';
 
                         // 1. ATOMIC UPLOAD
+                        if (!state.settings.folderId) throw new Error("Folder ID missing.");
+
+                        const uploadStart = Date.now();
+                        console.log(`[Step 1/3] Uploading to Google Drive...`);
+
                         const result = await apiCall('uploadPhoto', {
                             trialId: item.trialId,
                             fileData: item.photo.fileData,
@@ -5643,125 +6037,108 @@ Respond ONLY with a single minified JSON object in this format: {"identification
                             date: item.photo.date
                         }, false);
 
-                        if (result && result._errType) {
-                            if (result._errType === 'fetch' || result._errType === 'network') {
-                                throw new Error(`Link Timeout: ${result.message}`);
-                            } else {
-                                throw new Error(`Server Rejected: ${result.message}`);
-                            }
-                        }
+                        const uploadTime = ((Date.now() - uploadStart) / 1000).toFixed(2);
+                        console.log(`%c✔ Drive Upload Complete (${uploadTime}s)`, "color: #16a34a;");
 
-                        if (!result || (!result.url && !result.id)) {
-                            throw new Error('Verification Error: Script returned empty link.');
-                        }
+                        if (result && result._errType) throw new Error(`Server Error: ${result.message}`);
+                        if (!result?.url && !result?.id) throw new Error('Empty response from script.');
 
                         const publicUrl = result.url || result.fileUrl;
-                        console.log(`[HyperSync] Cloud Link: ${publicUrl}`);
+                        console.log(`Cloud URL: ${publicUrl}`);
 
-                        // 2. AI ANALYSIS & IDENTIFICATION (NEW)
-                        // This prevents status getting stuck at "Syncing & Analyzing..." or "Processing..."
-                        let identifications = null;
-                        let efficacyObs = null;
-
-                        try {
-                            if (isWeed) {
-                                console.log(`[HyperSync] Identifying weeds in background...`);
-                                identifications = await identifyWeedsFromPhoto(item.photo.fileData, item.photo.mimeType);
-                            } else if (state.settings.autoAnalyzePhotos) {
-                                console.log(`[HyperSync] Running efficacy analysis in background...`);
-                                efficacyObs = await analyzePhotoForEfficacy(item.photo.fileData, item.photo.mimeType);
-                            }
-                        } catch (aiErr) {
-                            console.warn(`[HyperSync] AI Background Task Failed:`, aiErr.message);
-                        }
-
-                        // 3. INTERNAL STATE RECONCILIATION
+                        // 2. INTERNAL STATE & BACKGROUND AI
                         if (trial) {
                             let photos = isWeed ? safeJsonParse(trial.WeedPhotosJSON) : safeJsonParse(trial.PhotoURLs);
                             const idx = photos.findIndex(p => p.tempId === item.photo.tempId);
 
                             if (idx > -1) {
                                 photos[idx].url = publicUrl;
-                                // Update label if it was "Processing..." or empty
                                 if (!photos[idx].label || photos[idx].label === "Processing...") {
-                                    photos[idx].label = item.photo.label || (identifications ? identifications.map(i => i.name).join(', ') : `Synced ${new Date().toLocaleDateString()}`);
+                                    photos[idx].label = item.photo.label || `Synced ${new Date().toLocaleDateString()}`;
                                 }
-                                if (isWeed) {
-                                    photos[idx].identifications = identifications || [];
-                                }
-                                delete photos[idx].fileData; // Memory Cleanup
+                                delete photos[idx].fileData;
                             } else {
-                                const newPhoto = {
-                                    url: publicUrl,
-                                    date: item.photo.date,
-                                    label: item.photo.label || (identifications ? identifications.map(i => i.name).join(', ') : ''),
-                                    tempId: item.photo.tempId
-                                };
-                                if (isWeed) newPhoto.identifications = identifications || [];
-                                photos.push(newPhoto);
+                                photos.push({ url: publicUrl, date: item.photo.date, label: item.photo.label || '', tempId: item.photo.tempId });
                             }
 
-                            const jsonStr = JSON.stringify(photos);
-                            if (isWeed) trial.WeedPhotosJSON = jsonStr; else trial.PhotoURLs = jsonStr;
+                            if (isWeed) trial.WeedPhotosJSON = JSON.stringify(photos); else trial.PhotoURLs = JSON.stringify(photos);
 
-                            // Update Efficacy Data if analysis was performed
-                            if (efficacyObs && !isWeed) {
-                                let efficacyData = safeJsonParse(trial.EfficacyDataJSON);
-                                const observationDate = new Date(item.photo.date);
-                                const trialDate = new Date(trial.Date);
-                                const daa = Math.round((observationDate.getTime() - trialDate.getTime()) / (1000 * 60 * 60 * 24));
+                            // 3. PERSIST PHOTO LINK TO SHEET
+                            const handshakeStart = Date.now();
+                            console.log(`[Step 2/3] Updating Spreadsheet...`);
 
-                                efficacyData.push({
-                                    date: observationDate.toISOString().split('T')[0],
-                                    daa: daa >= 0 ? daa : 0,
-                                    phyto: efficacyObs.phyto,
-                                    notes: `AI Background analysis from photo on ${observationDate.toLocaleDateString()}`,
-                                    photoUrl: publicUrl,
-                                    weedDetails: efficacyObs.weedDetails
-                                });
-                                trial.EfficacyDataJSON = JSON.stringify(efficacyData);
-                                trial.AISummariesJSON = '{}'; // Reset summaries for regeneration
-                            }
-
-                            // 4. PERSIST HANDSHAKE TO SHEET
-                            console.log(`[HyperSync] Recording final state in Spreadsheet...`);
-                            const sheetPayload = {
-                                ID: trial.ID, // Ensure correct casing
+                            await apiCall('updateTrialRecord', {
+                                ID: trial.ID,
                                 [isWeed ? 'WeedPhotosJSON' : 'PhotoURLs']: trial[isWeed ? 'WeedPhotosJSON' : 'PhotoURLs']
-                            };
-                            if (efficacyObs && !isWeed) {
-                                sheetPayload.EfficacyDataJSON = trial.EfficacyDataJSON;
-                                sheetPayload.AISummariesJSON = '{}';
-                            }
+                            }, false);
 
-                            const sheetUpdate = await apiCall('updateTrialRecord', sheetPayload, false);
-
-                            if (sheetUpdate && sheetUpdate._errType) throw new Error("Sync Handshake Failed on Spreadsheet update.");
+                            const handshakeTime = ((Date.now() - handshakeStart) / 1000).toFixed(2);
+                            console.log(`%c✔ Spreadsheet Handshake Complete (${handshakeTime}s)`, "color: #16a34a;");
 
                             refreshRelevantUI(item.trialId, item.type);
+
+                            // 4. FIRE-AND-FORGET AI
+                            console.log(`[Step 3/3] Launching Background AI Analysis (Non-blocking)...`);
+                            (async () => {
+                                const aiStart = Date.now();
+                                try {
+                                    if (isWeed) {
+                                        const ids = await identifyWeedsFromPhoto(item.photo.fileData, item.photo.mimeType);
+                                        if (ids?.length > 0) {
+                                            const t = state.trials.find(x => x.ID === item.trialId);
+                                            let wPhotos = safeJsonParse(t.WeedPhotosJSON);
+                                            const pIdx = wPhotos.findIndex(p => p.tempId === item.photo.tempId);
+                                            if (pIdx > -1) {
+                                                wPhotos[pIdx].identifications = ids;
+                                                if (!wPhotos[pIdx].label || wPhotos[pIdx].label.includes('Synced')) wPhotos[pIdx].label = ids.map(i => i.name).join(', ');
+                                                t.WeedPhotosJSON = JSON.stringify(wPhotos);
+                                                await apiCall('updateTrialRecord', { ID: t.ID, WeedPhotosJSON: t.WeedPhotosJSON }, false);
+                                                refreshRelevantUI(item.trialId, 'weed_upload');
+                                                console.log(`[AI Background] Weed ID finished in ${((Date.now() - aiStart) / 1000).toFixed(2)}s`);
+                                            }
+                                        }
+                                    } else if (state.settings.autoAnalyzePhotos) {
+                                        const eff = await analyzePhotoForEfficacy(item.photo.fileData, item.photo.mimeType);
+                                        if (eff) {
+                                            const t = state.trials.find(x => x.ID === item.trialId);
+                                            let eData = safeJsonParse(t.EfficacyDataJSON);
+                                            const obsDate = new Date(item.photo.date);
+                                            const tDate = new Date(t.Date);
+                                            const daa = Math.round((obsDate.getTime() - tDate.getTime()) / (1000 * 60 * 60 * 24));
+
+                                            eData.push({ date: obsDate.toISOString().split('T')[0], daa: daa >= 0 ? daa : 0, phyto: eff.phyto, notes: `AI Background analysis from photo on ${obsDate.toLocaleDateString()}`, photoUrl: publicUrl, weedDetails: eff.weedDetails });
+                                            t.EfficacyDataJSON = JSON.stringify(eData);
+                                            t.AISummariesJSON = '{}';
+                                            await apiCall('updateTrialRecord', { ID: t.ID, EfficacyDataJSON: t.EfficacyDataJSON, AISummariesJSON: '{}' }, false);
+                                            refreshRelevantUI(item.trialId, 'general_upload');
+                                            console.log(`[AI Background] Efficacy finished in ${((Date.now() - aiStart) / 1000).toFixed(2)}s`);
+                                        }
+                                    }
+                                } catch (aiErr) { console.warn(`[AI Background] Failed:`, aiErr.message); }
+                            })();
                         }
 
                         item.status = 'completed';
                         state.syncQueue = state.syncQueue.filter(i => i.id !== item.id);
-                        console.log(`[HyperSync] 100% Synced: ${item.id}`);
+
+                        const totalItemTime = ((Date.now() - itemStartTime) / 1000).toFixed(2);
+                        console.log(`%cTotal Item Process Time: ${totalItemTime}s`, "font-weight: bold; color: #0d9488;");
+                        console.groupEnd();
 
                     } catch (error) {
-                        console.warn(`[HyperSync] Interrupted:`, error.message);
+                        console.error(`%c[Sync Error] ${itemLabel} Failed: ${error.message}`, "color: #dc2626; font-weight: bold;");
                         item.attempts = (item.attempts || 0) + 1;
-
-                        if (error.message.includes('Timeout') || error.message.includes('fetch')) {
-                            item.status = 'pending'; // Auto-retry logic
-                        } else {
-                            item.status = 'failed';
-                            item.lastError = error.message;
-                        }
+                        item.status = error.message.includes('Timeout') || error.message.includes('fetch') ? 'pending' : 'failed';
+                        item.lastError = error.message;
+                        console.groupEnd();
                     }
                     saveSyncQueue();
                     renderSyncStatus();
                 }
 
                 _isSyncProcessing = false;
-                console.log("[HyperSync] Resting.");
+                const totalQueueTime = ((Date.now() - queueStartTime) / 1000).toFixed(2);
+                console.log(`[HighTechSync] Queue Finished | Total Time: ${totalQueueTime}s`);
                 renderSyncStatus();
             }
 
