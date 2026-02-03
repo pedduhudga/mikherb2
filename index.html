@@ -10675,13 +10675,31 @@ Write a 2-3 paragraph executive summary highlighting key findings, treatment per
                             try {
                                 console.log(`[AI] Trying ${provider.name}${keyLabel} for text generation...`);
 
-                                // Simple text generation endpoint (works for Gemini)
-                                const response = await fetch(`${provider.endpoint}?key=${apiKey}`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
+                                // Build request based on provider type
+                                let url = provider.endpoint;
+                                let headers = { 'Content-Type': 'application/json' };
+                                let body = {};
+
+                                // Gemini uses query param auth
+                                if (provider.id.includes('gemini')) {
+                                    url = `${provider.endpoint}?key=${apiKey}`;
+                                    body = {
                                         contents: [{ parts: [{ text: prompt }] }]
-                                    })
+                                    };
+                                }
+                                // Groq, Mistral, Qwen, Florence use Authorization header
+                                else {
+                                    headers['Authorization'] = `Bearer ${apiKey}`;
+                                    body = {
+                                        model: provider.model || 'default',
+                                        messages: [{ role: 'user', content: prompt }]
+                                    };
+                                }
+
+                                const response = await fetch(url, {
+                                    method: 'POST',
+                                    headers: headers,
+                                    body: JSON.stringify(body)
                                 });
 
                                 if (!response.ok) {
@@ -10690,7 +10708,16 @@ Write a 2-3 paragraph executive summary highlighting key findings, treatment per
                                 }
 
                                 const data = await response.json();
-                                if (!data.candidates || data.candidates.length === 0) {
+
+                                // Extract text from response (format varies by provider)
+                                let text;
+                                if (data.candidates && data.candidates.length > 0) {
+                                    // Gemini format
+                                    text = data.candidates[0].content.parts[0].text;
+                                } else if (data.choices && data.choices.length > 0) {
+                                    // OpenAI/Groq/Mistral format
+                                    text = data.choices[0].message.content;
+                                } else {
                                     throw new Error('No content generated');
                                 }
 
@@ -10699,7 +10726,7 @@ Write a 2-3 paragraph executive summary highlighting key findings, treatment per
                                 this.usage[usageKey] = (this.usage[usageKey] || 0) + 1;
                                 this.saveUsageStats();
                                 console.log(`[AI] ✅ Success with ${provider.name}${keyLabel}`);
-                                return data.candidates[0].content.parts[0].text;
+                                return text;
 
                             } catch (e) {
                                 console.warn(`[AI] ${provider.name}${keyLabel} failed:`, e.message);
