@@ -10560,10 +10560,17 @@ Write a 2-3 paragraph executive summary highlighting key findings, treatment per
                             speed: 1.5
                         },
                         {
+                            id: 'gemini-flash',
+                            name: 'Gemini 1.5 Flash',
+                            endpoint: 'https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent',
+                            dailyLimit: 15000,
+                            speed: 1
+                        },
+                        {
                             id: 'gemini',
                             name: 'Gemini 2.5 Pro',
                             endpoint: 'https://generativelanguage.googleapis.com/v1/models/gemini-2.5-pro:generateContent',
-                            dailyLimit: 1500,
+                            dailyLimit: 10,
                             speed: 3
                         },
                         {
@@ -10620,64 +10627,89 @@ Write a 2-3 paragraph executive summary highlighting key findings, treatment per
                 }
 
                 getAPIKey(providerId) {
-                    return localStorage.getItem(`AI_KEY_${providerId.toUpperCase()}`);
+                    // Gemini Flash uses the same keys as Gemini Pro
+                    const baseId = (providerId === 'gemini-flash') ? 'GEMINI' : providerId.toUpperCase();
+
+                    // Try multiple API keys: AI_KEY_GEMINI_1, AI_KEY_GEMINI_2, etc.
+                    const keys = [];
+
+                    // First try base key without number
+                    const baseKey = localStorage.getItem(`AI_KEY_${baseId}`);
+                    if (baseKey) keys.push(baseKey);
+
+                    // Then try numbered keys (1-5)
+                    for (let i = 1; i <= 5; i++) {
+                        const key = localStorage.getItem(`AI_KEY_${baseId}_${i}`);
+                        if (key) keys.push(key);
+                    }
+
+                    return keys; // Return array of keys
                 }
 
-                hasQuota(provider) {
-                    const used = this.usage[provider.id] || 0;
+                hasQuota(provider, keyIndex = 0) {
+                    const usageKey = `${provider.id}_${keyIndex}`;
+                    const used = this.usage[usageKey] || 0;
                     return used < provider.dailyLimit;
                 }
 
                 async generateText(prompt) {
                     // Try each provider in order until one succeeds
                     for (const provider of this.providers) {
-                        const apiKey = this.getAPIKey(provider.id);
-                        if (!apiKey) {
+                        const apiKeys = this.getAPIKey(provider.id);
+
+                        if (!apiKeys || apiKeys.length === 0) {
                             console.log(`[AI] Skipping ${provider.name} - no API key`);
                             continue;
                         }
 
-                        if (!this.hasQuota(provider)) {
-                            console.log(`[AI] Skipping ${provider.name} - quota exceeded`);
-                            continue;
-                        }
+                        // Try each API key for this provider
+                        for (let keyIndex = 0; keyIndex < apiKeys.length; keyIndex++) {
+                            const apiKey = apiKeys[keyIndex];
+                            const keyLabel = apiKeys.length > 1 ? ` (Key ${keyIndex + 1}/${apiKeys.length})` : '';
 
-                        try {
-                            console.log(`[AI] Trying ${provider.name} for text generation...`);
-                            
-                            // Simple text generation endpoint (works for Gemini)
-                            const response = await fetch(`${provider.endpoint}?key=${apiKey}`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    contents: [{ parts: [{ text: prompt }] }]
-                                })
-                            });
-
-                            if (!response.ok) {
-                                const err = await response.text();
-                                throw new Error(`AI Error: ${err}`);
+                            if (!this.hasQuota(provider, keyIndex)) {
+                                console.log(`[AI] Skipping ${provider.name}${keyLabel} - quota exceeded`);
+                                continue;
                             }
 
-                            const data = await response.json();
-                            if (!data.candidates || data.candidates.length === 0) {
-                                throw new Error('No content generated');
-                            }
+                            try {
+                                console.log(`[AI] Trying ${provider.name}${keyLabel} for text generation...`);
 
-                            // Success! Track usage and return
-                            this.usage[provider.id] = (this.usage[provider.id] || 0) + 1;
-                            this.saveUsageStats();
-                            console.log(`[AI] ✅ Success with ${provider.name}`);
-                            return data.candidates[0].content.parts[0].text;
-                            
-                        } catch (e) {
-                            console.warn(`[AI] ${provider.name} failed:`, e.message);
-                            // Continue to next provider
+                                // Simple text generation endpoint (works for Gemini)
+                                const response = await fetch(`${provider.endpoint}?key=${apiKey}`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        contents: [{ parts: [{ text: prompt }] }]
+                                    })
+                                });
+
+                                if (!response.ok) {
+                                    const err = await response.text();
+                                    throw new Error(`API Error: ${response.status}`);
+                                }
+
+                                const data = await response.json();
+                                if (!data.candidates || data.candidates.length === 0) {
+                                    throw new Error('No content generated');
+                                }
+
+                                // Success! Track usage and return
+                                const usageKey = `${provider.id}_${keyIndex}`;
+                                this.usage[usageKey] = (this.usage[usageKey] || 0) + 1;
+                                this.saveUsageStats();
+                                console.log(`[AI] ✅ Success with ${provider.name}${keyLabel}`);
+                                return data.candidates[0].content.parts[0].text;
+
+                            } catch (e) {
+                                console.warn(`[AI] ${provider.name}${keyLabel} failed:`, e.message);
+                                // Continue to next key or provider
+                            }
                         }
                     }
 
-                    // All providers failed
-                    throw new Error('All AI providers failed or have no quota. Please check your API keys and quotas.');
+                    // All providers and keys failed
+                    throw new Error('All AI providers failed or have no quota. Please check your API keys.');
                 }
 
                 async analyzePhoto(photoUrl, context) {
